@@ -104,6 +104,7 @@ func Monitor(wallets []string, tgNotifier *notifier.TgNotifier, log *logger.Logg
 						if err != nil {
 							log.Error("Error while sending message to telegram: %v", err)
 						}
+						log.Info("Sent notification successfully")
 					}
 					if i == len(activity)-1 {
 						cache[wallet] = activity
