@@ -130,22 +130,22 @@ func buildNotifierMessage(event activityResponse) string {
 		message = fmt.Sprintf(
 			"<b>New Polymarket Prediction By <a href=\"%s%s\">@%s</a></b>\n\n"+
 				"<b>%s</b>\n\n"+
-				"<b>Bought</b> %f of <b>%s</b> \n"+
-				"Price: %f \n"+
-				"Total: $%f\n\n"+
+				"<b>Bought</b> %.1f of <b>%s</b> \n"+
+				"Price: %.0f¢ \n"+
+				"Total: $%.2f\n\n"+
 				"[<a href=\"%s/%s/%s\">View on Polymarket</a>]",
-			profileURL, event.Name, event.Name, event.Title, event.Size, event.Outcome, event.Price, event.UsdcSize,
+			profileURL, event.Name, event.Name, event.Title, event.Size, event.Outcome, event.Price*100, event.UsdcSize,
 			eventURL, event.EventSlug, event.Slug)
 	}
 	if event.Type == "TRADE" && event.Side == "SELL" {
 		message = fmt.Sprintf(
 			"<b>New Polymarket Prediction By <a href=\"%s%s\">@%s</a></b>\n\n"+
 				"<b>%s</b>\n\n"+
-				"<b>Sold</b> %f of <b>%s</b> \n"+
-				"Price: %f \n"+
-				"Total: $%f\n\n"+
+				"<b>Sold</b> %.1f of <b>%s</b> \n"+
+				"Price: %.0f¢ \n"+
+				"Total: $%.2f\n\n"+
 				"[<a href=\"%s/%s/%s\">View on Polymarket</a>]",
-			profileURL, event.Name, event.Name, event.Title, event.Size, event.Outcome, event.Price, event.UsdcSize,
+			profileURL, event.Name, event.Name, event.Title, event.Size, event.Outcome, event.Price*100, event.UsdcSize,
 			eventURL, event.EventSlug, event.Slug)
 	}
 	return message
