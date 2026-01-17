@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 	"polymarket_monitor/internal/notifier"
-	"reflect"
+	"slices"
 	"time"
 )
 
@@ -20,7 +20,7 @@ const (
 )
 
 // cache used to store wallets activity
-var cache = map[string][]activityResponse{}
+var cache = map[string][]string{}
 
 // getActivity gets last 25 activity events for wallet address
 func getActivity(wallet string) ([]activityResponse, error) {
@@ -54,7 +54,9 @@ func initMonitor(wallets []string, log *logger.Logger) error {
 			log.Error("Failed to get wallet %s activity: %v", wallet, err)
 			continue
 		}
-		cache[wallet] = activity
+		for _, tx := range activity {
+			cache[wallet] = append(cache[wallet], tx.TransactionHash)
+		}
 	}
 
 	if len(cache) == 0 {
@@ -85,34 +87,20 @@ func Monitor(wallets []string, tgNotifier *notifier.TgNotifier, log *logger.Logg
 				continue
 			}
 
-			if _, ok := cache[wallet]; !ok && activity != nil {
-				cache[wallet] = activity
-				time.Sleep(monitorSleepDelay)
-				continue
-			}
-
-			if reflect.DeepEqual(activity, cache[wallet]) {
-				time.Sleep(monitorSleepDelay)
-				continue
-			}
-
-			for i, event := range activity {
-				if event != cache[wallet][0] {
+			for _, event := range activity {
+				if !slices.Contains(cache[wallet], event.TransactionHash) {
 					message := buildNotifierMessage(event)
 					if message != "" {
 						err = tgNotifier.Notify(message)
 						if err != nil {
 							log.Error("Error while sending message to telegram: %v", err)
 						}
+						log.Debug("cache: %v | activity resp: %v", cache[wallet], activity)
 						log.Info("Sent notification successfully")
 					}
-					if i == len(activity)-1 {
-						cache[wallet] = activity
-					}
+					cache[wallet] = addToCache(cache[wallet], event.TransactionHash)
 				} else {
-					cache[wallet] = activity
-					time.Sleep(monitorSleepDelay)
-					break
+					continue
 				}
 			}
 		}
@@ -150,4 +138,15 @@ func buildNotifierMessage(event activityResponse) string {
 			eventURL, event.EventSlug, event.Slug)
 	}
 	return message
+}
+
+// addToCache removes the last element of cache[wallet] and prepends a new value,
+// keeping the cache size constant.
+func addToCache[T any](s []T, v T) []T {
+	if len(s) == 0 {
+		return s
+	}
+	s = s[:len(s)-1]         // delete last
+	s = append([]T{v}, s...) // add to beginning
+	return s
 }
