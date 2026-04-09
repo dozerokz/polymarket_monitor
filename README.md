@@ -2,7 +2,7 @@
 
 A lightweight Go application that monitors Polymarket wallet activity and sends real-time notifications to Telegram when trades are detected.
 
-![Polymarket monitor](https://github-production-user-asset-6210df.s3.amazonaws.com/60073740/525572030-0bba8d35-a512-49a1-a5f7-d106bebf683f.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAVCODYLSA53PQK4ZA%2F20251211%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20251211T195945Z&X-Amz-Expires=300&X-Amz-Signature=9ef67701a81f11a6a11aa7595ce2e4b304df74744a0e557440af4e2ecea413c4&X-Amz-SignedHeaders=host)
+![Polymarket monitor](https://i.imgur.com/PkGbdo8.png)
 
 
 ## Features
@@ -37,6 +37,12 @@ go mod download
 ```
 3. Create a `.env` file in the root directory:
 
+```bash
+cp .env.example .env
+```
+
+Then edit `.env`:
+
 ```env
 TG_BOT_TOKEN=your_telegram_bot_token_here
 CHAT_ID=your_telegram_chat_id_here
@@ -54,6 +60,7 @@ The .env file requires the following variables:
 - `CHAT_ID` - The Telegram chat ID where notifications will be sent
 
 The `.env` file is not included in the repository for security reasons.
+Use `.env.example` as a template.
 
 ## Usage
 
@@ -85,6 +92,7 @@ polymarket_monitor/
 │       ├── parser.go
 │       └── model.go
 ├── .env (create this)
+├── .env.example
 ├── wallets.txt (edit this)
 ├── go.mod
 ├── go.sum
@@ -105,6 +113,11 @@ polymarket_monitor/
 - Sends Telegram notifications for detected trades
 
 - Updates cache with latest activity
+
+## Notes
+
+- Poll interval is 5 seconds; on Polymarket API errors a wallet is retried after 15 seconds.
+- Logs are written to `logger/out.log`.
 
 ## License
 

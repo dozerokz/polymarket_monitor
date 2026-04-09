@@ -19,6 +19,9 @@ func init() {
 		log.Error("Error loading .env file: %v", err)
 		os.Exit(1)
 	}
+	if err = os.MkdirAll("logger", 0o755); err != nil {
+		log.Error("error while creating logger directory: %v", err)
+	}
 	err = log.SetLogFile("logger/out.log")
 	if err != nil {
 		err = log.SetLogFile("out.log")

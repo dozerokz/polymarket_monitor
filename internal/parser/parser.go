@@ -6,32 +6,50 @@ import (
 	"github.com/dozerokz/logger"
 	"io"
 	"net/http"
+	"net/url"
 	"polymarket_monitor/internal/notifier"
-	"reflect"
+	"slices"
+	"strings"
 	"time"
 )
 
 const (
-	activityEndpoint  = "https://data-api.polymarket.com/activity?limit=20&sortBy=TIMESTAMP&sortDirection=DESC&user=%s"
+	activityLimit     = 20
+	activityEndpoint  = "https://data-api.polymarket.com/activity?limit=%d&sortBy=TIMESTAMP&sortDirection=DESC&user=%s"
 	eventURL          = "https://polymarket.com/event/"
 	profileURL        = "https://polymarket.com/@"
 	monitorSleepDelay = 5 * time.Second
 	monitorErrorDelay = 15 * time.Second
+	httpTimeout       = 30 * time.Second
 )
 
-// cache used to store wallets activity
-var cache = map[string][]activityResponse{}
+var httpClient = &http.Client{Timeout: httpTimeout}
 
-// getActivity gets last 25 activity events for wallet address
+// cache used to store wallets activity
+var cache = map[string][]string{}
+
+// initialized marks wallets that were warmed up (to avoid spamming old activity after transient init errors).
+var initialized = map[string]bool{}
+
+func normalizeTransactionHash(hash string) string {
+	return strings.ToLower(strings.TrimSpace(hash))
+}
+
+// getActivity gets last activity events for wallet address
 func getActivity(wallet string) ([]activityResponse, error) {
 	var userActivity []activityResponse
 
-	resp, err := http.Get(fmt.Sprintf(activityEndpoint, wallet))
+	resp, err := httpClient.Get(fmt.Sprintf(activityEndpoint, activityLimit, url.QueryEscape(wallet)))
 	if err != nil {
 		return userActivity, fmt.Errorf("failed to make request for user '%s' activity: %w", wallet, err)
 	}
 
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return userActivity, fmt.Errorf("activity request for user '%s' failed: %s | %s", wallet, resp.Status, string(body))
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -46,76 +64,111 @@ func getActivity(wallet string) ([]activityResponse, error) {
 	return userActivity, nil
 }
 
-// initMonitor saves wallets activity to map to avoid notifications for old events
-func initMonitor(wallets []string, log *logger.Logger) error {
+// initMonitor saves wallets activity to cache to avoid notifications for old events.
+// If a wallet fails to init (network/API error), it will be warmed up later in the monitor loop.
+func initMonitor(wallets []string, log *logger.Logger) (int, error) {
+	if len(wallets) == 0 {
+		return 0, fmt.Errorf("wallets list is empty")
+	}
+
+	initializedCount := 0
 	for _, wallet := range wallets {
+		cache[wallet] = make([]string, 0, activityLimit)
+		initialized[wallet] = false
+
 		activity, err := getActivity(wallet)
 		if err != nil {
-			log.Error("Failed to get wallet %s activity: %v", wallet, err)
+			log.Error("Failed to get wallet %s activity during init: %v", wallet, err)
 			continue
 		}
-		cache[wallet] = activity
+		// Iterate from oldest to newest so that the newest transaction ends up at the front of the cache.
+		for i := len(activity) - 1; i >= 0; i-- {
+			tx := activity[i]
+			hash := normalizeTransactionHash(tx.TransactionHash)
+			if hash == "" {
+				continue
+			}
+			cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
+		}
+		initialized[wallet] = true
+		initializedCount++
 	}
 
-	if len(cache) == 0 {
-		return fmt.Errorf("failed to initialize monitor. all wallets have no activity")
-	}
-
-	return nil
+	return initializedCount, nil
 }
 
 // Monitor is main monitoring function.
 // Tracking wallets activity, comparing to previously saved, sending notification to telegram if new activity detected
 func Monitor(wallets []string, tgNotifier *notifier.TgNotifier, log *logger.Logger) {
-	initErr := initMonitor(wallets, log)
+	initializedCount, initErr := initMonitor(wallets, log)
 	if initErr != nil {
 		log.Error("%v", initErr)
 		return
 	}
 
-	log.Info("Initialized successfully %d wallets", len(cache))
+	log.Info("Initialized successfully %d/%d wallets", initializedCount, len(wallets))
+
+	nextFetchAt := make(map[string]time.Time, len(wallets))
 
 	for {
+		now := time.Now()
+
 		for _, wallet := range wallets {
+			if t := nextFetchAt[wallet]; !t.IsZero() && now.Before(t) {
+				continue
+			}
+
 			activity, err := getActivity(wallet)
 			if err != nil {
-				log.Error("Error while getting wallet %s activity: %v | sleeping %v",
+				log.Error("Error while getting wallet %s activity: %v | next attempt in %v",
 					wallet, err, monitorErrorDelay)
-				time.Sleep(monitorErrorDelay)
+				nextFetchAt[wallet] = time.Now().Add(monitorErrorDelay)
 				continue
 			}
 
-			if _, ok := cache[wallet]; !ok && activity != nil {
-				cache[wallet] = activity
-				time.Sleep(monitorSleepDelay)
+			nextFetchAt[wallet] = time.Time{}
+
+			// Warm up wallets that failed init to prevent spamming old activity.
+			if !initialized[wallet] {
+				cache[wallet] = cache[wallet][:0]
+				// Iterate from oldest to newest so that the newest transaction ends up at the front of the cache.
+				for i := len(activity) - 1; i >= 0; i-- {
+					tx := activity[i]
+					hash := normalizeTransactionHash(tx.TransactionHash)
+					if hash == "" {
+						continue
+					}
+					cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
+				}
+				initialized[wallet] = true
+				log.Info("Initialized wallet %s", wallet)
 				continue
 			}
 
-			if reflect.DeepEqual(activity, cache[wallet]) {
-				time.Sleep(monitorSleepDelay)
-				continue
-			}
-
-			for i, event := range activity {
-				if event != cache[wallet][0] {
+			// Process from oldest to newest to keep cache eviction consistent and notifications chronological.
+			for i := len(activity) - 1; i >= 0; i-- {
+				event := activity[i]
+				hash := normalizeTransactionHash(event.TransactionHash)
+				if hash == "" {
+					continue
+				}
+				if !slices.Contains(cache[wallet], hash) {
 					message := buildNotifierMessage(event)
 					if message != "" {
 						err = tgNotifier.Notify(message)
 						if err != nil {
 							log.Error("Error while sending message to telegram: %v", err)
 						}
+						log.Debug("cache: %v | activity resp: %v", cache[wallet], activity)
 						log.Info("Sent notification successfully")
 					}
-					if i == len(activity)-1 {
-						cache[wallet] = activity
-					}
+					cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
 				} else {
-					cache[wallet] = activity
-					time.Sleep(monitorSleepDelay)
-					break
+					continue
 				}
 			}
 		}
+		time.Sleep(monitorSleepDelay)
 	}
 }
 
@@ -150,4 +203,22 @@ func buildNotifierMessage(event activityResponse) string {
 			eventURL, event.EventSlug, event.Slug)
 	}
 	return message
+}
+
+// addToCache prepends a new value and caps cache size to maxSize.
+// If the value already exists, it is moved to the front.
+func addToCache[T comparable](s []T, v T, maxSize int) []T {
+	if maxSize <= 0 {
+		return s
+	}
+
+	if idx := slices.Index(s, v); idx != -1 {
+		s = append(s[:idx], s[idx+1:]...)
+	}
+
+	s = append([]T{v}, s...)
+	if len(s) > maxSize {
+		s = s[:maxSize]
+	}
+	return s
 }
