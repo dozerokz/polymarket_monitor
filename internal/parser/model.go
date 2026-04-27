@@ -14,3 +14,15 @@ type activityResponse struct {
 	Name            string  `json:"name"`
 	TransactionHash string  `json:"transactionHash"`
 }
+
+// eventDetailsResponse is the subset of gamma-api event payload used for tag-based filtering.
+type eventDetailsResponse struct {
+	Slug  string             `json:"slug"`
+	Title string             `json:"title"`
+	Tags  []eventTagResponse `json:"tags"`
+}
+
+type eventTagResponse struct {
+	Label string `json:"label"`
+	Slug  string `json:"slug"`
+}

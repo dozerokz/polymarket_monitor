@@ -25,8 +25,15 @@ const (
 
 var httpClient = &http.Client{Timeout: httpTimeout}
 
+var gammaEventEndpoint = "https://gamma-api.polymarket.com/events/slug/%s"
+
+var blacklistedEventTags = []string{"sports", "esports"}
+
 // cache used to store wallets activity
 var cache = map[string][]string{}
+
+// eventDetailsCache keeps gamma-api lookups by event slug to avoid repeating tag requests.
+var eventDetailsCache = map[string]eventDetailsResponse{}
 
 // initialized marks wallets that were warmed up (to avoid spamming old activity after transient init errors).
 var initialized = map[string]bool{}
@@ -62,6 +69,87 @@ func getActivity(wallet string) ([]activityResponse, error) {
 	}
 
 	return userActivity, nil
+}
+
+func getEventDetails(eventSlug string) (eventDetailsResponse, error) {
+	eventSlug = strings.TrimSpace(eventSlug)
+	if eventSlug == "" {
+		return eventDetailsResponse{}, fmt.Errorf("event slug is empty")
+	}
+
+	if eventDetails, ok := eventDetailsCache[eventSlug]; ok {
+		return eventDetails, nil
+	}
+
+	endpoint := fmt.Sprintf(gammaEventEndpoint, url.PathEscape(eventSlug))
+	resp, err := httpClient.Get(endpoint)
+	if err != nil {
+		return eventDetailsResponse{}, fmt.Errorf("failed to make request for event '%s': %w", eventSlug, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return eventDetailsResponse{}, fmt.Errorf("event request for '%s' failed: %s | %s", eventSlug, resp.Status, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return eventDetailsResponse{}, fmt.Errorf("failed to read event response body: %w", err)
+	}
+
+	var eventDetails eventDetailsResponse
+	if err = json.Unmarshal(body, &eventDetails); err != nil {
+		return eventDetailsResponse{}, fmt.Errorf("failed to unmarshal event response: %w", err)
+	}
+
+	eventDetailsCache[eventSlug] = eventDetails
+	return eventDetails, nil
+}
+
+func normalizeTagIdentifier(tag string) string {
+	return strings.ToLower(strings.TrimSpace(tag))
+}
+
+func findBlacklistedEventTags(tags []eventTagResponse) []string {
+	var matchedTags []string
+	seen := make(map[string]struct{}, len(blacklistedEventTags))
+
+	for _, tag := range tags {
+		for _, identifier := range []string{tag.Slug, tag.Label} {
+			normalizedIdentifier := normalizeTagIdentifier(identifier)
+			if normalizedIdentifier == "" || !slices.Contains(blacklistedEventTags, normalizedIdentifier) {
+				continue
+			}
+			if _, ok := seen[normalizedIdentifier]; ok {
+				continue
+			}
+
+			seen[normalizedIdentifier] = struct{}{}
+			matchedTags = append(matchedTags, normalizedIdentifier)
+		}
+	}
+
+	return matchedTags
+}
+
+func eventLookupSlug(event activityResponse) string {
+	if strings.TrimSpace(event.EventSlug) != "" {
+		return event.EventSlug
+	}
+
+	return event.Slug
+}
+
+func shouldSkipNotificationByTags(event activityResponse) (bool, []string, error) {
+	eventDetails, err := getEventDetails(eventLookupSlug(event))
+	if err != nil {
+		return false, nil, err
+	}
+
+	matchedTags := findBlacklistedEventTags(eventDetails.Tags)
+	return len(matchedTags) > 0, matchedTags, nil
 }
 
 // initMonitor saves wallets activity to cache to avoid notifications for old events.
@@ -154,14 +242,28 @@ func Monitor(wallets []string, tgNotifier *notifier.TgNotifier, log *logger.Logg
 				}
 				if !slices.Contains(cache[wallet], hash) {
 					message := buildNotifierMessage(event)
-					if message != "" {
-						err = tgNotifier.Notify(message)
-						if err != nil {
-							log.Error("Error while sending message to telegram: %v", err)
-						}
-						log.Debug("cache: %v | activity resp: %v", cache[wallet], activity)
-						log.Info("Sent notification successfully")
+					if message == "" {
+						cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
+						continue
 					}
+
+					shouldSkip, matchedTags, err := shouldSkipNotificationByTags(event)
+					if err != nil {
+						log.Error("Failed to resolve tags for event %s (tx %s): %v | notification will be sent anyway",
+							eventLookupSlug(event), hash, err)
+					} else if shouldSkip {
+						log.Info("Skipped notification for wallet %s, tx %s, event %s due to blacklisted tags: %s",
+							wallet, hash, eventLookupSlug(event), strings.Join(matchedTags, ", "))
+						cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
+						continue
+					}
+
+					err = tgNotifier.Notify(message)
+					if err != nil {
+						log.Error("Error while sending message to telegram: %v", err)
+					}
+					log.Debug("cache: %v | activity resp: %v", cache[wallet], activity)
+					log.Info("Sent notification successfully")
 					cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
 				} else {
 					continue
