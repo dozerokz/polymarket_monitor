@@ -27,7 +27,7 @@ var httpClient = &http.Client{Timeout: httpTimeout}
 
 var gammaEventEndpoint = "https://gamma-api.polymarket.com/events/slug/%s"
 
-var blacklistedEventTags = []string{"sports", "esports"}
+var blacklistedEventTags []string
 
 // cache used to store wallets activity
 var cache = map[string][]string{}
@@ -112,7 +112,15 @@ func normalizeTagIdentifier(tag string) string {
 	return strings.ToLower(strings.TrimSpace(tag))
 }
 
+func SetBlacklistedEventTags(tags []string) {
+	blacklistedEventTags = append([]string(nil), tags...)
+}
+
 func findBlacklistedEventTags(tags []eventTagResponse) []string {
+	if len(blacklistedEventTags) == 0 {
+		return nil
+	}
+
 	var matchedTags []string
 	seen := make(map[string]struct{}, len(blacklistedEventTags))
 

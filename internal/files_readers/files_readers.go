@@ -5,16 +5,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ReadTXT reads lines from .txt file to slice of strings
 func ReadTXT(filePath string) ([]string, error) {
-	exeDir, err := getExecutableDir()
+	resolvedPath, err := resolveFilePath(filePath)
 	if err != nil {
 		return nil, err
 	}
 
-	file, err := os.Open(filepath.Join(exeDir, filePath))
+	file, err := os.Open(resolvedPath)
 	if err != nil {
 		return nil, err
 	}
@@ -34,6 +36,34 @@ func ReadTXT(filePath string) ([]string, error) {
 	}
 
 	return lines, nil
+}
+
+// ReadYAML reads YAML file content into out.
+func ReadYAML(filePath string, out any) error {
+	resolvedPath, err := resolveFilePath(filePath)
+	if err != nil {
+		return err
+	}
+
+	content, err := os.ReadFile(resolvedPath)
+	if err != nil {
+		return err
+	}
+
+	return yaml.Unmarshal(content, out)
+}
+
+func resolveFilePath(filePath string) (string, error) {
+	if filepath.IsAbs(filePath) {
+		return filePath, nil
+	}
+
+	exeDir, err := getExecutableDir()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(exeDir, filePath), nil
 }
 
 // getExecutableDir determines the correct directory based on how the program is running

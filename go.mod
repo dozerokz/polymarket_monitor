@@ -5,4 +5,5 @@ go 1.25.0
 require (
 	github.com/dozerokz/logger v0.0.0-20251015092950-b6446553b62d
 	github.com/joho/godotenv v1.5.1
+	gopkg.in/yaml.v3 v3.0.1
 )

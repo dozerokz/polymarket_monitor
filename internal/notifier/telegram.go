@@ -9,34 +9,45 @@ import (
 )
 
 const (
-	SendMessageEndpoint = "https://api.telegram.org/bot%s/sendMessage"
-	clientTimeOut       = 30 * time.Second
+	clientTimeOut = 30 * time.Second
 )
+
+var sendMessageEndpoint = "https://api.telegram.org/bot%s/sendMessage"
 
 // TgNotifier is structure used for telegram notifications
 type TgNotifier struct {
-	token  string
-	chatID string
-	client *http.Client
+	token   string
+	chatID  string
+	topicID *int64
+	client  *http.Client
 }
 
 // NewTgNotifier creates TgNotifier
-func NewTgNotifier(token string, chatID string) *TgNotifier {
+func NewTgNotifier(token string, chatID string, topicID *int64) *TgNotifier {
 
 	return &TgNotifier{
-		token:  token,
-		chatID: chatID,
+		token:   token,
+		chatID:  chatID,
+		topicID: topicID,
 		client: &http.Client{
-			Timeout: 30 * time.Second},
+			Timeout: clientTimeOut},
 	}
+}
+
+type sendMessagePayload struct {
+	Text            string `json:"text"`
+	ChatID          string `json:"chat_id"`
+	ParseMode       string `json:"parse_mode"`
+	MessageThreadID *int64 `json:"message_thread_id,omitempty"`
 }
 
 // Notify used for sending message string to telegram chat
 func (n *TgNotifier) Notify(message string) error {
-	payload := map[string]string{
-		"text":       message,
-		"chat_id":    n.chatID,
-		"parse_mode": "HTML",
+	payload := sendMessagePayload{
+		Text:            message,
+		ChatID:          n.chatID,
+		ParseMode:       "HTML",
+		MessageThreadID: n.topicID,
 	}
 
 	jsonValue, err := json.Marshal(payload)
@@ -44,7 +55,7 @@ func (n *TgNotifier) Notify(message string) error {
 		return fmt.Errorf("failed to marshal request payload: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", fmt.Sprintf(SendMessageEndpoint, n.token), bytes.NewBuffer(jsonValue))
+	req, err := http.NewRequest("POST", fmt.Sprintf(sendMessageEndpoint, n.token), bytes.NewBuffer(jsonValue))
 	if err != nil {
 		return fmt.Errorf("failed to create telegram post message request: %v", err)
 	}

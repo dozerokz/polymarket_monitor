@@ -46,9 +46,18 @@ Then edit `.env`:
 ```env
 TG_BOT_TOKEN=your_telegram_bot_token_here
 CHAT_ID=your_telegram_chat_id_here
+TG_TOPIC_ID=your_optional_telegram_topic_id_here
 ```
 
-4. Paste POLYMARKET wallet addresses into `wallets.txt` file in the root directory(one per line)
+4. Edit `config.yml` if you want to change negative tag filters:
+
+```yaml
+negative_tags:
+  - sports
+  - esports
+```
+
+5. Paste POLYMARKET wallet addresses into `wallets.txt` file in the root directory(one per line)
 
 ## Configuration
 
@@ -58,6 +67,10 @@ The .env file requires the following variables:
 - `TG_BOT_TOKEN` - Your Telegram bot token (obtain from @BotFather)
 
 - `CHAT_ID` - The Telegram chat ID where notifications will be sent
+
+- `TG_TOPIC_ID` - Optional Telegram forum topic ID; if empty, messages are sent to the main chat
+
+- `config.yml` - YAML config for app-level settings such as `negative_tags`
 
 The `.env` file is not included in the repository for security reasons.
 Use `.env.example` as a template.
@@ -84,6 +97,9 @@ polymarket_monitor/
 │   └── monitor/
 │       └── main.go
 ├── internal/
+│   ├── config/
+│   │   ├── config.go
+│   │   └── config_test.go
 │   ├── files_readers/
 │   │   └── files_readers.go
 │   ├── notifier/
@@ -91,6 +107,7 @@ polymarket_monitor/
 │   └── parser/
 │       ├── parser.go
 │       └── model.go
+├── config.yml
 ├── .env (create this)
 ├── .env.example
 ├── wallets.txt (edit this)
@@ -109,6 +126,8 @@ polymarket_monitor/
 - Continuously polls the Polymarket API for new activity
 
 - Compares new activity against cached data
+
+- Skips Telegram notifications for events with tags listed in `config.yml`
 
 - Sends Telegram notifications for detected trades
 

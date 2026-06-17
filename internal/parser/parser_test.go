@@ -9,6 +9,13 @@ import (
 )
 
 func TestFindBlacklistedEventTags(t *testing.T) {
+	originalTags := append([]string(nil), blacklistedEventTags...)
+	defer func() {
+		blacklistedEventTags = originalTags
+	}()
+
+	SetBlacklistedEventTags([]string{"sports", "esports"})
+
 	tags := []eventTagResponse{
 		{Label: "Esports", Slug: "esports"},
 		{Label: "Politics", Slug: "politics"},
