@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestFindBlacklistedEventTags(t *testing.T) {
@@ -72,5 +74,81 @@ func TestGetEventDetailsUsesCache(t *testing.T) {
 
 	if firstResponse.Slug != "test-event" || secondResponse.Slug != "test-event" {
 		t.Fatalf("unexpected cached event slug values: first=%q second=%q", firstResponse.Slug, secondResponse.Slug)
+	}
+}
+
+func TestBuildActivityKeyDistinguishesSameTransactionHash(t *testing.T) {
+	firstEvent := activityResponse{
+		Timestamp:       100,
+		Type:            "TRADE",
+		Side:            "BUY",
+		Slug:            "market-slug",
+		Outcome:         "Yes",
+		Size:            10,
+		UsdcSize:        5,
+		TransactionHash: "0xabc",
+	}
+	secondEvent := firstEvent
+	secondEvent.Size = 12
+
+	if buildActivityKey(firstEvent) == buildActivityKey(secondEvent) {
+		t.Fatal("expected activity keys to differ for fills that share tx hash but differ by amount")
+	}
+}
+
+func TestIsStaleActivity(t *testing.T) {
+	watermark := time.Unix(200, 0).UTC()
+
+	tests := []struct {
+		name      string
+		timestamp int64
+		want      bool
+	}{
+		{name: "missing timestamp", timestamp: 0, want: true},
+		{name: "older event", timestamp: 199, want: true},
+		{name: "same second", timestamp: 200, want: false},
+		{name: "newer event", timestamp: 201, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStaleActivity(activityResponse{Timestamp: tt.timestamp}, watermark); got != tt.want {
+				t.Fatalf("isStaleActivity() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildEventPageURLFallsBackToMarketSlug(t *testing.T) {
+	event := activityResponse{
+		Slug: "fifwc-jor-alg-2026-06-22-jor",
+	}
+
+	got := buildEventPageURL(event)
+	want := "https://polymarket.com/event/fifwc-jor-alg-2026-06-22-jor"
+	if got != want {
+		t.Fatalf("buildEventPageURL() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildNotifierMessageIncludesTrackedWallet(t *testing.T) {
+	message := buildNotifierMessage("0x1234", activityResponse{
+		Type:      "TRADE",
+		Side:      "BUY",
+		Name:      "Allezpapa",
+		Title:     "Will Jordan win on 2026-06-22?",
+		Outcome:   "Yes",
+		Size:      769.6,
+		Price:     0.15,
+		UsdcSize:  115.44,
+		Slug:      "fifwc-jor-alg-2026-06-22-jor",
+		EventSlug: "",
+	})
+
+	if !strings.Contains(message, "<code>0x1234</code>") {
+		t.Fatalf("expected tracked wallet to be present in message, got %q", message)
+	}
+	if strings.Contains(message, "event//") {
+		t.Fatalf("expected message link to avoid double slash, got %q", message)
 	}
 }

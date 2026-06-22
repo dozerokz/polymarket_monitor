@@ -2,3 +2,5 @@
 .env
 *.log
 .DS_Store
+activity_cache.sqlite*
+data/*.sqlite*

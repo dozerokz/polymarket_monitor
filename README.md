@@ -97,6 +97,9 @@ polymarket_monitor/
 │   └── monitor/
 │       └── main.go
 ├── internal/
+│   ├── activitycache/
+│   │   ├── store.go
+│   │   └── store_test.go
 │   ├── config/
 │   │   ├── config.go
 │   │   └── config_test.go
@@ -108,6 +111,8 @@ polymarket_monitor/
 │       ├── parser.go
 │       └── model.go
 ├── config.yml
+├── data/
+│   └── activity_cache.sqlite (created automatically)
 ├── .env (create this)
 ├── .env.example
 ├── wallets.txt (edit this)
@@ -125,7 +130,7 @@ polymarket_monitor/
 
 - Continuously polls the Polymarket API for new activity
 
-- Compares new activity against cached data
+- Compares new activity against a persistent SQLite dedupe cache
 
 - Skips Telegram notifications for events with tags listed in `config.yml`
 
@@ -136,6 +141,8 @@ polymarket_monitor/
 ## Notes
 
 - Poll interval is 5 seconds; on Polymarket API errors a wallet is retried after 15 seconds.
+- Seen activity is stored in `data/activity_cache.sqlite` so restarts do not resend old trades.
+- On the first updated launch, a legacy root-level `activity_cache.sqlite` and its SQLite sidecar files are moved into `data/` automatically.
 - Logs are written to `logger/out.log`.
 
 ## License

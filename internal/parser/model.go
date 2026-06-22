@@ -2,6 +2,7 @@ package parser
 
 // activityResponse is response structure from polymarket activity endpoint
 type activityResponse struct {
+	Timestamp       int64   `json:"timestamp"`
 	Type            string  `json:"type"`
 	Size            float64 `json:"size"`
 	UsdcSize        float64 `json:"usdcSize"`
@@ -12,6 +13,8 @@ type activityResponse struct {
 	EventSlug       string  `json:"eventSlug"`
 	Outcome         string  `json:"outcome"`
 	Name            string  `json:"name"`
+	Pseudonym       string  `json:"pseudonym"`
+	ProxyWallet     string  `json:"proxyWallet"`
 	TransactionHash string  `json:"transactionHash"`
 }
 

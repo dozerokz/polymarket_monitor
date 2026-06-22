@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"polymarket_monitor/internal/activitycache"
 	"polymarket_monitor/internal/notifier"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,9 +31,6 @@ var gammaEventEndpoint = "https://gamma-api.polymarket.com/events/slug/%s"
 
 var blacklistedEventTags []string
 
-// cache used to store wallets activity
-var cache = map[string][]string{}
-
 // eventDetailsCache keeps gamma-api lookups by event slug to avoid repeating tag requests.
 var eventDetailsCache = map[string]eventDetailsResponse{}
 
@@ -40,6 +39,57 @@ var initialized = map[string]bool{}
 
 func normalizeTransactionHash(hash string) string {
 	return strings.ToLower(strings.TrimSpace(hash))
+}
+
+func normalizeWalletAddress(wallet string) string {
+	return strings.ToLower(strings.TrimSpace(wallet))
+}
+
+func buildActivityKey(event activityResponse) string {
+	return strings.Join([]string{
+		strconv.FormatInt(event.Timestamp, 10),
+		normalizeTransactionHash(event.TransactionHash),
+		strings.ToUpper(strings.TrimSpace(event.Type)),
+		strings.ToUpper(strings.TrimSpace(event.Side)),
+		strings.TrimSpace(event.EventSlug),
+		strings.TrimSpace(event.Slug),
+		strings.TrimSpace(event.Outcome),
+		strconv.FormatFloat(event.Size, 'f', -1, 64),
+		strconv.FormatFloat(event.UsdcSize, 'f', -1, 64),
+	}, "|")
+}
+
+func seenEventFromActivity(event activityResponse) activitycache.SeenEvent {
+	return activitycache.SeenEvent{
+		Key:             buildActivityKey(event),
+		TransactionHash: normalizeTransactionHash(event.TransactionHash),
+		SeenAt:          time.Unix(event.Timestamp, 0).UTC(),
+	}
+}
+
+func isStaleActivity(event activityResponse, watermark time.Time) bool {
+	if event.Timestamp <= 0 {
+		return true
+	}
+
+	return time.Unix(event.Timestamp, 0).UTC().Before(watermark)
+}
+
+func belongsToTrackedWallet(trackedWallet string, event activityResponse) bool {
+	proxyWallet := normalizeWalletAddress(event.ProxyWallet)
+	if proxyWallet == "" {
+		return true
+	}
+
+	return proxyWallet == normalizeWalletAddress(trackedWallet)
+}
+
+func displayHandle(event activityResponse) string {
+	if handle := strings.TrimSpace(event.Name); handle != "" {
+		return handle
+	}
+
+	return strings.TrimSpace(event.Pseudonym)
 }
 
 // getActivity gets last activity events for wallet address
@@ -151,6 +201,10 @@ func eventLookupSlug(event activityResponse) string {
 }
 
 func shouldSkipNotificationByTags(event activityResponse) (bool, []string, error) {
+	if len(blacklistedEventTags) == 0 {
+		return false, nil, nil
+	}
+
 	eventDetails, err := getEventDetails(eventLookupSlug(event))
 	if err != nil {
 		return false, nil, err
@@ -160,32 +214,60 @@ func shouldSkipNotificationByTags(event activityResponse) (bool, []string, error
 	return len(matchedTags) > 0, matchedTags, nil
 }
 
-// initMonitor saves wallets activity to cache to avoid notifications for old events.
+func seedWalletActivity(wallet string, activity []activityResponse, store *activitycache.Store, log *logger.Logger) error {
+	seenEvents := make([]activitycache.SeenEvent, 0, len(activity))
+	for i := len(activity) - 1; i >= 0; i-- {
+		event := activity[i]
+		if !belongsToTrackedWallet(wallet, event) {
+			log.Error("Skipped seeding mismatched activity for requested wallet %s: proxyWallet=%s tx=%s",
+				wallet, event.ProxyWallet, normalizeTransactionHash(event.TransactionHash))
+			continue
+		}
+
+		seenEvent := seenEventFromActivity(event)
+		if seenEvent.Key == "" {
+			continue
+		}
+		seenEvents = append(seenEvents, seenEvent)
+	}
+
+	if err := store.SeedWallet(wallet, seenEvents, time.Now().UTC()); err != nil {
+		return fmt.Errorf("failed to seed wallet %s activity cache: %w", wallet, err)
+	}
+
+	return nil
+}
+
+// initMonitor seeds wallet activity in the persistent cache to avoid notifications for old events.
 // If a wallet fails to init (network/API error), it will be warmed up later in the monitor loop.
-func initMonitor(wallets []string, log *logger.Logger) (int, error) {
+func initMonitor(wallets []string, store *activitycache.Store, log *logger.Logger) (int, error) {
 	if len(wallets) == 0 {
 		return 0, fmt.Errorf("wallets list is empty")
 	}
 
 	initializedCount := 0
 	for _, wallet := range wallets {
-		cache[wallet] = make([]string, 0, activityLimit)
-		initialized[wallet] = false
+		isInitialized, err := store.IsWalletInitialized(wallet)
+		if err != nil {
+			return initializedCount, err
+		}
+		initialized[wallet] = isInitialized
+		if initialized[wallet] {
+			initializedCount++
+			continue
+		}
 
 		activity, err := getActivity(wallet)
 		if err != nil {
 			log.Error("Failed to get wallet %s activity during init: %v", wallet, err)
 			continue
 		}
-		// Iterate from oldest to newest so that the newest transaction ends up at the front of the cache.
-		for i := len(activity) - 1; i >= 0; i-- {
-			tx := activity[i]
-			hash := normalizeTransactionHash(tx.TransactionHash)
-			if hash == "" {
-				continue
-			}
-			cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
+
+		if err = seedWalletActivity(wallet, activity, store, log); err != nil {
+			log.Error("Failed to seed wallet %s activity cache during init: %v", wallet, err)
+			continue
 		}
+
 		initialized[wallet] = true
 		initializedCount++
 	}
@@ -195,8 +277,8 @@ func initMonitor(wallets []string, log *logger.Logger) (int, error) {
 
 // Monitor is main monitoring function.
 // Tracking wallets activity, comparing to previously saved, sending notification to telegram if new activity detected
-func Monitor(wallets []string, tgNotifier *notifier.TgNotifier, log *logger.Logger) {
-	initializedCount, initErr := initMonitor(wallets, log)
+func Monitor(wallets []string, tgNotifier *notifier.TgNotifier, store *activitycache.Store, log *logger.Logger) {
+	initializedCount, initErr := initMonitor(wallets, store, log)
 	if initErr != nil {
 		log.Error("%v", initErr)
 		return
@@ -226,55 +308,100 @@ func Monitor(wallets []string, tgNotifier *notifier.TgNotifier, log *logger.Logg
 
 			// Warm up wallets that failed init to prevent spamming old activity.
 			if !initialized[wallet] {
-				cache[wallet] = cache[wallet][:0]
-				// Iterate from oldest to newest so that the newest transaction ends up at the front of the cache.
-				for i := len(activity) - 1; i >= 0; i-- {
-					tx := activity[i]
-					hash := normalizeTransactionHash(tx.TransactionHash)
-					if hash == "" {
-						continue
-					}
-					cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
+				if err = seedWalletActivity(wallet, activity, store, log); err != nil {
+					log.Error("Failed to seed wallet %s activity cache: %v | next attempt in %v",
+						wallet, err, monitorErrorDelay)
+					nextFetchAt[wallet] = time.Now().Add(monitorErrorDelay)
+					continue
 				}
 				initialized[wallet] = true
 				log.Info("Initialized wallet %s", wallet)
 				continue
 			}
 
+			activityWatermark, err := store.ActivityWatermark(wallet)
+			if err != nil {
+				log.Error("Failed to read activity watermark for wallet %s: %v", wallet, err)
+				continue
+			}
+
 			// Process from oldest to newest to keep cache eviction consistent and notifications chronological.
 			for i := len(activity) - 1; i >= 0; i-- {
 				event := activity[i]
-				hash := normalizeTransactionHash(event.TransactionHash)
-				if hash == "" {
+				seenEvent := seenEventFromActivity(event)
+				if seenEvent.Key == "" {
 					continue
 				}
-				if !slices.Contains(cache[wallet], hash) {
-					message := buildNotifierMessage(event)
-					if message == "" {
-						cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
-						continue
-					}
-
-					shouldSkip, matchedTags, err := shouldSkipNotificationByTags(event)
-					if err != nil {
-						log.Error("Failed to resolve tags for event %s (tx %s): %v | notification will be sent anyway",
-							eventLookupSlug(event), hash, err)
-					} else if shouldSkip {
-						log.Info("Skipped notification for wallet %s, tx %s, event %s due to blacklisted tags: %s",
-							wallet, hash, eventLookupSlug(event), strings.Join(matchedTags, ", "))
-						cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
-						continue
-					}
-
-					err = tgNotifier.Notify(message)
-					if err != nil {
-						log.Error("Error while sending message to telegram: %v", err)
-					}
-					log.Debug("cache: %v | activity resp: %v", cache[wallet], activity)
-					log.Info("Sent notification successfully")
-					cache[wallet] = addToCache(cache[wallet], hash, activityLimit)
-				} else {
+				if !belongsToTrackedWallet(wallet, event) {
+					log.Error("Skipped mismatched activity for requested wallet %s: proxyWallet=%s tx=%s",
+						wallet, event.ProxyWallet, seenEvent.TransactionHash)
 					continue
+				}
+
+				seen, err := store.HasSeenEvent(wallet, seenEvent.Key)
+				if err != nil {
+					log.Error("Failed to read activity cache for wallet %s, tx %s: %v",
+						wallet, seenEvent.TransactionHash, err)
+					continue
+				}
+				if seen {
+					continue
+				}
+
+				eventTime := time.Unix(event.Timestamp, 0).UTC()
+				if isStaleActivity(event, activityWatermark) {
+					log.Info("Skipped stale activity for wallet %s, tx %s: event_time=%s watermark=%s",
+						wallet, seenEvent.TransactionHash, eventTime.Format(time.RFC3339),
+						activityWatermark.Format(time.RFC3339Nano))
+					if err = store.RememberEvent(wallet, seenEvent); err != nil {
+						log.Error("Failed to update activity cache for wallet %s, tx %s: %v",
+							wallet, seenEvent.TransactionHash, err)
+					}
+					continue
+				}
+
+				message := buildNotifierMessage(wallet, event)
+				if message == "" {
+					if err = store.RememberEvent(wallet, seenEvent); err != nil {
+						log.Error("Failed to update activity cache for wallet %s, tx %s: %v",
+							wallet, seenEvent.TransactionHash, err)
+					}
+					if eventTime.After(activityWatermark) {
+						activityWatermark = eventTime
+					}
+					continue
+				}
+
+				shouldSkip, matchedTags, err := shouldSkipNotificationByTags(event)
+				if err != nil {
+					log.Error("Failed to resolve tags for event %s (tx %s): %v | notification will be sent anyway",
+						eventLookupSlug(event), seenEvent.TransactionHash, err)
+				} else if shouldSkip {
+					log.Info("Skipped notification for wallet %s, tx %s, event %s due to blacklisted tags: %s",
+						wallet, seenEvent.TransactionHash, eventLookupSlug(event), strings.Join(matchedTags, ", "))
+					if err = store.RememberEvent(wallet, seenEvent); err != nil {
+						log.Error("Failed to update activity cache for wallet %s, tx %s: %v",
+							wallet, seenEvent.TransactionHash, err)
+					}
+					if eventTime.After(activityWatermark) {
+						activityWatermark = eventTime
+					}
+					continue
+				}
+
+				err = tgNotifier.Notify(message)
+				if err != nil {
+					log.Error("Error while sending message to telegram: %v", err)
+				} else {
+					log.Info("Sent notification successfully for wallet %s, tx %s", wallet, seenEvent.TransactionHash)
+				}
+
+				if err = store.RememberEvent(wallet, seenEvent); err != nil {
+					log.Error("Failed to update activity cache for wallet %s, tx %s: %v",
+						wallet, seenEvent.TransactionHash, err)
+				}
+				if eventTime.After(activityWatermark) {
+					activityWatermark = eventTime
 				}
 			}
 		}
@@ -282,53 +409,58 @@ func Monitor(wallets []string, tgNotifier *notifier.TgNotifier, log *logger.Logg
 	}
 }
 
-// buildNotifierMessage creating formatted message for telegram
-func buildNotifierMessage(event activityResponse) string {
-	var message string
-
-	if event.Type == "REWARD" {
-		return message
+func buildEventPageURL(event activityResponse) string {
+	pathParts := make([]string, 0, 2)
+	if slug := strings.Trim(event.EventSlug, "/"); slug != "" {
+		pathParts = append(pathParts, slug)
+	}
+	if slug := strings.Trim(event.Slug, "/"); slug != "" {
+		if len(pathParts) == 0 || pathParts[len(pathParts)-1] != slug {
+			pathParts = append(pathParts, slug)
+		}
+	}
+	if len(pathParts) == 0 {
+		return ""
 	}
 
-	if event.Type == "TRADE" && event.Side == "BUY" {
-		message = fmt.Sprintf(
-			"<b>New Polymarket Prediction By <a href=\"%s%s\">@%s</a></b>\n\n"+
-				"<b>%s</b>\n\n"+
-				"<b>Bought</b> %.1f of <b>%s</b> \n"+
-				"Price: %.0f¢ \n"+
-				"Total: $%.2f\n\n"+
-				"[<a href=\"%s/%s/%s\">View on Polymarket</a>]",
-			profileURL, event.Name, event.Name, event.Title, event.Size, event.Outcome, event.Price*100, event.UsdcSize,
-			eventURL, event.EventSlug, event.Slug)
-	}
-	if event.Type == "TRADE" && event.Side == "SELL" {
-		message = fmt.Sprintf(
-			"<b>New Polymarket Prediction By <a href=\"%s%s\">@%s</a></b>\n\n"+
-				"<b>%s</b>\n\n"+
-				"<b>Sold</b> %.1f of <b>%s</b> \n"+
-				"Price: %.0f¢ \n"+
-				"Total: $%.2f\n\n"+
-				"[<a href=\"%s/%s/%s\">View on Polymarket</a>]",
-			profileURL, event.Name, event.Name, event.Title, event.Size, event.Outcome, event.Price*100, event.UsdcSize,
-			eventURL, event.EventSlug, event.Slug)
-	}
-	return message
+	return strings.TrimRight(eventURL, "/") + "/" + strings.Join(pathParts, "/")
 }
 
-// addToCache prepends a new value and caps cache size to maxSize.
-// If the value already exists, it is moved to the front.
-func addToCache[T comparable](s []T, v T, maxSize int) []T {
-	if maxSize <= 0 {
-		return s
+func buildTrackedWalletLabel(trackedWallet string, event activityResponse) string {
+	handle := displayHandle(event)
+	if handle == "" {
+		return fmt.Sprintf("<code>%s</code>", trackedWallet)
 	}
 
-	if idx := slices.Index(s, v); idx != -1 {
-		s = append(s[:idx], s[idx+1:]...)
+	return fmt.Sprintf("<a href=\"%s%s\">@%s</a> (<code>%s</code>)", profileURL, handle, handle, trackedWallet)
+}
+
+// buildNotifierMessage creates formatted message for telegram.
+func buildNotifierMessage(trackedWallet string, event activityResponse) string {
+	if event.Type == "REWARD" {
+		return ""
 	}
 
-	s = append([]T{v}, s...)
-	if len(s) > maxSize {
-		s = s[:maxSize]
+	action := ""
+	switch {
+	case event.Type == "TRADE" && event.Side == "BUY":
+		action = "Bought"
+	case event.Type == "TRADE" && event.Side == "SELL":
+		action = "Sold"
+	default:
+		return ""
 	}
-	return s
+
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("<b>New Polymarket Prediction From %s</b>\n\n", buildTrackedWalletLabel(trackedWallet, event)))
+	builder.WriteString(fmt.Sprintf("<b>%s</b>\n\n", event.Title))
+	builder.WriteString(fmt.Sprintf("<b>%s</b> %.1f of <b>%s</b> \n", action, event.Size, event.Outcome))
+	builder.WriteString(fmt.Sprintf("Price: %.0f¢ \n", event.Price*100))
+	builder.WriteString(fmt.Sprintf("Total: $%.2f\n\n", event.UsdcSize))
+
+	if eventPageURL := buildEventPageURL(event); eventPageURL != "" {
+		builder.WriteString(fmt.Sprintf("[<a href=\"%s\">View on Polymarket</a>]", eventPageURL))
+	}
+
+	return builder.String()
 }

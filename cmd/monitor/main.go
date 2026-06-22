@@ -5,6 +5,7 @@ import (
 	"github.com/dozerokz/logger"
 	"github.com/joho/godotenv"
 	"os"
+	"polymarket_monitor/internal/activitycache"
 	"polymarket_monitor/internal/config"
 	filesreaders "polymarket_monitor/internal/files_readers"
 	"polymarket_monitor/internal/notifier"
@@ -17,6 +18,9 @@ var log *logger.Logger
 var wallets []string
 var telegramTopicID *int64
 var appConfig config.Config
+
+const activityCachePath = "data/activity_cache.sqlite"
+const legacyActivityCachePath = "activity_cache.sqlite"
 
 func getOptionalTelegramTopicID() (*int64, error) {
 	rawTopicID := strings.TrimSpace(os.Getenv("TG_TOPIC_ID"))
@@ -78,6 +82,16 @@ func init() {
 func main() {
 	tgNotifier := notifier.NewTgNotifier(os.Getenv("TG_BOT_TOKEN"), os.Getenv("CHAT_ID"), telegramTopicID)
 	parser.SetBlacklistedEventTags(appConfig.NegativeTags)
+	if err := activitycache.MigrateLegacyDatabase(legacyActivityCachePath, activityCachePath); err != nil {
+		log.Error("Failed to migrate legacy activity cache: %v", err)
+		os.Exit(1)
+	}
+	activityStore, err := activitycache.Open(activityCachePath)
+	if err != nil {
+		log.Error("Failed to open activity cache: %v", err)
+		os.Exit(1)
+	}
+	defer activityStore.Close()
 
-	parser.Monitor(wallets, tgNotifier, log)
+	parser.Monitor(wallets, tgNotifier, activityStore, log)
 }

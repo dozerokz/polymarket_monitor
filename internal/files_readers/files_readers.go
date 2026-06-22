@@ -11,7 +11,7 @@ import (
 
 // ReadTXT reads lines from .txt file to slice of strings
 func ReadTXT(filePath string) ([]string, error) {
-	resolvedPath, err := resolveFilePath(filePath)
+	resolvedPath, err := ResolvePath(filePath)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +40,7 @@ func ReadTXT(filePath string) ([]string, error) {
 
 // ReadYAML reads YAML file content into out.
 func ReadYAML(filePath string, out any) error {
-	resolvedPath, err := resolveFilePath(filePath)
+	resolvedPath, err := ResolvePath(filePath)
 	if err != nil {
 		return err
 	}
@@ -53,7 +53,8 @@ func ReadYAML(filePath string, out any) error {
 	return yaml.Unmarshal(content, out)
 }
 
-func resolveFilePath(filePath string) (string, error) {
+// ResolvePath resolves file paths relative to the executable/current working directory.
+func ResolvePath(filePath string) (string, error) {
 	if filepath.IsAbs(filePath) {
 		return filePath, nil
 	}
